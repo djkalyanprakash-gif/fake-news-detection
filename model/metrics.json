@@ -1,0 +1,10 @@
+{
+  "source": "kaggle_combined",
+  "rows": 39907,
+  "fake": 18441,
+  "real": 21466,
+  "test_size": 0.2,
+  "accuracy": 0.9805,
+  "model": "TF-IDF (1-2 grams, 20k features) + Logistic Regression",
+  "note": "Student project. Accuracy is on a held-out split of these Kaggle datasets (mostly 2016-2018 US news + celebrity news), not a general fact-checking score."
+}
