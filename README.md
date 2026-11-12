@@ -13,7 +13,7 @@ Fake News Detection is a Streamlit web app that estimates whether a news article
 
 - Paste any headline and article text and get a Real or Fake verdict with confidence
 - Shows the words that influenced the result most
-- Live news check: searches Google News for the headline and shows real recent coverage next to the verdict, so recent events the model never saw can still be judged from actual reporting (on by default, untick to turn it off)
+- Live news check: searches current coverage for the headline across a curated set of national, regional and international news outlets and shows real recent articles next to the verdict, so recent events the model never saw can still be judged from actual reporting (on by default, untick to turn it off). It also cross-checks the two: when the model says Fake but several outlets are reporting the story, the app says so plainly and points out the coverage is the stronger signal
 - Optional Gemini summary: if a Gemini API key is set in Streamlit secrets (`GEMINI_API_KEY`), Gemini briefly says whether the coverage found supports the headline. Without a key the live check still works, showing the sources only
 - Warns clearly when the pasted text is too short for a reliable verdict
 - Three built-in examples to try without typing anything
@@ -108,7 +108,7 @@ The trained model is tracked in this repo as `model/fake_news_model.joblib.b64` 
 2. **TF-IDF:** the cleaned text is turned into word and two-word features, weighted by how distinctive they are across the training set (20,000 features).
 3. **Logistic regression:** the features are fed to a logistic regression classifier, which outputs the probability that the article is fake. Above 0.5 the verdict is Fake, below it Real.
 4. **Top words:** because the classifier is linear, the app can show which words in the article pushed the score up or down the most.
-5. **Live check:** if the box is ticked, the app also searches Google News for the headline and lists recent matching articles, so the user can compare the model's style-based verdict with real current reporting. With a Gemini API key set in secrets, Gemini adds a short summary of whether the coverage supports the headline.
+5. **Live check:** if the box is ticked, the app also searches current coverage for the headline — restricted to a curated set of about 55 national, regional and international news outlets (the full list of sites is in `TRACKED_SITE_BATCHES` in `app.py`) — and lists the most relevant recent articles, newest first. It then cross-checks the model's verdict against the coverage: if the model says Fake but two or more outlets are reporting the story, the app warns that the coverage is the stronger signal, because the model only judges writing style. With a Gemini API key set in secrets, Gemini adds a short summary of whether the coverage supports the headline.
 
 ## Limitations
 
@@ -121,7 +121,7 @@ The trained model is tracked in this repo as `model/fake_news_model.joblib.b64` 
 
 - The model runs locally inside the app — pasted articles are processed in memory only and are never stored or saved to disk.
 - There is no login, no analytics, and no tracking.
-- The live news check is the only external call the app makes, and only when its box is ticked (it is on by default): it sends only the headline to Google News search and shows the matching coverage. The article text is never sent. Untick the box and nothing leaves the app.
+- The live news check is the only external call the app makes, and only when its box is ticked (it is on by default): it sends only the headline to the news search (Google News RSS, restricted to the tracked outlets) and shows the matching coverage. The article text is never sent. Untick the box and nothing leaves the app.
 - If a Gemini API key is set in Streamlit secrets, the headline and the titles of the coverage found are also sent to the Gemini API for a short summary. No key is set by default, and the key is never stored in this repository.
 - The only cookies are the ones Streamlit itself needs to keep the app running.
 - Recent checks are kept only in your browser session (in memory) and disappear when the session ends. You can clear them any time with the Clear history button.
