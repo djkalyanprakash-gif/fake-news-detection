@@ -19,7 +19,7 @@ Fake News Detection is a Streamlit web app that estimates whether a news article
 
 ## Live Demo
 
-Live demo link will be added after deployment on Streamlit Community Cloud.
+Try it here: https://jwxxtkjkizjx5lbuab8nwi.streamlit.app/ (hosted free on Streamlit Community Cloud)
 
 ## Dataset
 
