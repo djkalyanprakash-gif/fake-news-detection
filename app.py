@@ -124,7 +124,10 @@ model, metrics, is_fallback = load_model()
 st.markdown('<div class="kicker">Student project · Machine learning</div>', unsafe_allow_html=True)
 st.title("Fake News Detection")
 st.write("Paste a news headline and article. The model estimates whether it "
-         "reads like real or fake news, and shows how confident it is.")
+         "reads like real or fake news, and shows how confident it is. "
+         "It works best on a full article — a one-line question or a headline "
+         "on its own gives an unreliable result, and the model cannot check "
+         "facts or recent events.")
 
 if is_fallback:
     st.warning("Demo mode — the trained model file was not found, so this is "
@@ -173,6 +176,13 @@ if submitted:
         verdict = "Fake" if fake_prob >= 0.5 else "Real"
         confidence = fake_prob if verdict == "Fake" else 1 - fake_prob
         cls = "verdict-fake" if verdict == "Fake" else "verdict-real"
+        word_count = len(clean(full).split())
+        if word_count < 40:
+            st.warning(
+                f"Short text — only {word_count} words. The model judges "
+                "writing style, and with this little text the verdict is "
+                "little better than a guess. Paste the full article for a "
+                "meaningful result.")
         st.markdown(
             f'<div class="{cls}"><b>Verdict: Likely {verdict} news</b><br>'
             f'Confidence: {confidence:.0%} &nbsp;·&nbsp; '
@@ -185,6 +195,9 @@ if submitted:
             st.write(", ".join(f"`{w}` ({c:+.2f})" for w, c in words))
         st.caption("A high score means the writing resembles fake articles in the "
                    "training data — it is not proof that a claim is false. "
+                   "The model was trained on 2016–2018 articles and knows "
+                   "nothing about recent events, so it cannot tell you whether "
+                   "something that happened this year is true. "
                    "Always check the original source.")
         st.session_state.history.insert(0, {
             "headline": headline or "(no headline)",
