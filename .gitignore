@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+
+# Virtual environments
+.venv/
+venv/
+
+# Datasets (downloaded separately, too large for the repo)
+data/*.zip
+data/*.csv
+data/*.txt
+
+# Trained model binary — the model is tracked as model/fake_news_model.joblib.b64
+*.joblib
+
+# Streamlit secrets
+.streamlit/secrets.toml
+
+# Secrets and credentials — never commit these
+.env
+*.pem
+*.key
+secrets.toml
+*credentials*
+*secret*
+
+# Logs and OS files
+*.log
+.DS_Store
