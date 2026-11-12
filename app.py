@@ -12,13 +12,15 @@ still works: it trains a small in-memory fallback on built-in samples
 and says so clearly on screen, instead of crashing.
 
 The model only knows 2016–2018 training data, so it cannot judge
-recent events. The optional live check searches Google News for the
-headline and shows real recent coverage next to the model verdict.
-If a Gemini API key is set in Streamlit secrets (GEMINI_API_KEY),
-Gemini briefly summarises whether that coverage supports the
-headline. Without a key the live check still works — it just shows
-the sources without a summary. The live check is off when the user
-unticks it, and then nothing leaves the app.
+recent events. The optional live check searches current news for the
+headline and shows real recent coverage next to the model verdict —
+only from the outlets in TRACKED_OUTLETS — then cross-checks the
+model verdict against that coverage. If a Gemini API key is set in
+Streamlit secrets (GEMINI_API_KEY), Gemini briefly summarises
+whether that coverage supports the headline. Without a key the live
+check still works — it just shows the sources without a summary.
+The live check is off when the user unticks it, and then nothing
+leaves the app.
 """
 
 import base64
@@ -27,6 +29,8 @@ import io
 import json
 import re
 import xml.etree.ElementTree as ET
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 from urllib.parse import quote_plus
@@ -120,29 +124,22 @@ def top_words(model, text: str, n: int = 8):
         return []
 
 
-def live_news_search(query: str, max_results: int = 5):
-    """Search Google News (RSS, no key needed) for recent coverage.
+def _fetch_rss_items(query: str, timeout: int = 10):
+    """Fetch one Google News RSS search and return parsed items.
 
-    Returns (results, error): results is a list of dicts with
-    title, link, source and published; error is a short message
-    when the search itself failed, else None.
+    Each item is a dict with title, link, source, published (a
+    display string) and published_dt (a datetime for sorting).
+    Raises on network or parse failure.
     """
-    query = " ".join(str(query or "").split())[:200]
-    if not query:
-        return [], "No headline to search for."
     url = ("https://news.google.com/rss/search?q="
            f"{quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en")
-    try:
-        resp = requests.get(
-            url,
-            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsCheck/1.0)"},
-            timeout=10)
-        resp.raise_for_status()
-        root = ET.fromstring(resp.content)
-    except Exception:
-        return [], ("Live news search is unavailable right now — "
-                    "check your connection and try again.")
-    results = []
+    resp = requests.get(
+        url,
+        headers={"User-Agent": "Mozilla/5.0 (compatible; NewsCheck/1.0)"},
+        timeout=timeout)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.content)
+    items = []
     for item in root.iter("item"):
         title = html.unescape((item.findtext("title") or "").strip())
         link = (item.findtext("link") or "").strip()
@@ -155,18 +152,148 @@ def live_news_search(query: str, max_results: int = 5):
         source_el = item.find("source")
         if source_el is not None and source_el.text:
             source = source_el.text.strip()
-        published = ""
+        published, published_dt = "", None
         pub = item.findtext("pubDate")
         if pub:
             try:
-                published = parsedate_to_datetime(pub).strftime("%d %b %Y")
+                published_dt = parsedate_to_datetime(pub)
+                published = published_dt.strftime("%d %b %Y")
             except Exception:
-                published = ""
-        results.append({"title": title, "link": link,
-                        "source": source, "published": published})
-        if len(results) >= max_results:
-            break
-    return results, None
+                published_dt = None
+        items.append({"title": title, "link": link, "source": source,
+                      "published": published, "published_dt": published_dt})
+    return items
+
+
+def live_news_search(query: str, max_results: int = 5):
+    """Search live news for recent coverage, from tracked outlets only.
+
+    The headline is searched against the tracked outlets' sites
+    (batched `site:` queries run in parallel), and results are
+    additionally filtered by outlet name, de-duplicated and sorted
+    newest first. If the site-restricted search finds nothing, one
+    broad search is tried as a fallback and filtered the same way.
+    Returns (results, error).
+    """
+    query = " ".join(str(query or "").split())[:200]
+    if not query:
+        return [], "No headline to search for."
+
+    def _keep(items, kept, seen):
+        for r in items:
+            if _normalise_outlet(r["source"]) not in TRACKED_OUTLETS:
+                continue
+            key = r["link"] or r["title"].lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            kept.append(r)
+
+    kept, seen = [], set()
+    failed = 0
+    batch_queries = [
+        query + " " + " OR ".join(f"site:{d}" for d in batch)
+        for batch in TRACKED_SITE_BATCHES
+    ]
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = [pool.submit(_fetch_rss_items, q)
+                   for q in batch_queries]
+        for fut in as_completed(futures):
+            try:
+                _keep(fut.result(), kept, seen)
+            except Exception:
+                failed += 1
+    if not kept:
+        try:
+            _keep(_fetch_rss_items(query), kept, seen)
+        except Exception:
+            failed += 1
+    if not kept and failed:
+        return [], ("Live news search is unavailable right now — "
+                    "check your connection and try again.")
+    # Rank by relevance: site-restricted searches return loosely
+    # related items too, so count how many headline words appear
+    # in each title, newest first within the same score. Items
+    # matching no headline word at all are dropped.
+    stopwords = {"a", "an", "the", "of", "in", "on", "to", "for",
+                 "and", "or", "is", "are", "was", "were", "has",
+                 "have", "by", "with", "at", "from", "as", "it",
+                 "its", "this", "that"}
+    words = {w for w in re.findall(r"[a-z0-9]+", query.lower())
+             if w not in stopwords}
+    scored = []
+    for r in kept:
+        title_words = set(re.findall(r"[a-z0-9]+", r["title"].lower()))
+        score = len(words & title_words)
+        if score:
+            scored.append((score, r))
+    fallback_dt = datetime.min.replace(tzinfo=timezone.utc)
+    scored.sort(key=lambda t: (t[0], t[1].get("published_dt") or fallback_dt),
+                reverse=True)
+    return [r for _, r in scored[:max_results]], None
+
+
+def _normalise_outlet(name: str) -> str:
+    """Lowercase outlet name with all non-alphanumerics removed,
+    so 'Times Now', 'TimesNow' and 'times-now' all match."""
+    return re.sub(r"[^a-z0-9]", "", str(name or "").lower())
+
+
+# Outlets the live check trusts, keyed by normalised name. The live
+# check only ever shows articles from these outlets. National and
+# regional Indian outlets plus international ones, as chosen for
+# this project. The app UI never lists them.
+TRACKED_OUTLETS = {
+    # Regional India
+    "news18odia", "kanaknews", "otv", "odishatv", "asianetnews",
+    "asianet", "janamtv", "mathrubhuminews", "mathrubhumi",
+    "thanthitv", "thanthi", "news18tamilnadu", "news18tamil",
+    "puthiyathalaimurai", "tv9gujarati", "newslive", "pragnews",
+    "dy365",
+    # National India
+    "opindia", "sudarshannews", "hindupost", "thehindupost",
+    "organiser", "organiserweekly", "panchjanya", "sanatanprabhat",
+    "hinduvoice", "republictv", "republicworld", "republic",
+    "republicbharat", "zeenews", "zeehindustan", "zeemedia",
+    "timesnow", "timesnownews", "timesnownavbharat", "indiatv",
+    "indiatvnews", "aajtak", "tv9bharatvarsh", "tv9hindi",
+    "news18", "news18india", "abpnews", "abplive", "wion",
+    "wionnews", "ddnews", "indianews", "newsx", "newsxnews",
+    # International
+    "aljazeera", "aljazeeraenglish", "alarabiya",
+    "alarabiyaenglish", "skynewsarabia", "trtworld", "trt",
+    "presstv", "cgtn", "nhkworld", "nhkworldjapan", "cna",
+    "channelnewsasia", "dw", "dwnews", "deutschewelle",
+    "france24", "euronews", "rt", "rtnews", "i24news",
+    "skynews", "foxnews", "newsmax", "oann",
+    "oneamericanewsnetwork", "abcnews", "abcnewsaustralia",
+    "gbnews", "tvpworld",
+}
+
+# The same outlets as website domains, in batches for the
+# site-restricted search queries. Each batch becomes one search
+# request; the batches run in parallel.
+TRACKED_SITE_BATCHES = [
+    ["republicworld.com", "republicbharat.com", "timesnownews.com",
+     "timesnownavbharat.com", "zeenews.india.com",
+     "zeehindustan.india.com", "indiatvnews.com", "aajtak.in",
+     "tv9hindi.com", "news18.com", "abplive.com", "wionews.com",
+     "ddnews.gov.in", "newsx.com"],
+    ["opindia.com", "sudarshannews.com", "hindupost.in",
+     "organiser.org", "panchjanya.com", "sanatanprabhat.org",
+     "hinduvoice.in", "indianews.com", "odia.news18.com",
+     "tamil.news18.com", "kanaknews.com", "odishatv.in",
+     "asianetnews.com", "janamtv.com"],
+    ["mathrubhumi.com", "thanthitv.com", "puthiyathalaimurai.com",
+     "tv9gujarati.com", "newslive.tv", "pragnews.com", "dy365.in",
+     "aljazeera.com", "alarabiya.net", "skynewsarabia.com",
+     "trtworld.com", "presstv.ir", "cgtn.com",
+     "channelnewsasia.com"],
+    ["nhk.or.jp", "dw.com", "france24.com", "euronews.com",
+     "rt.com", "i24news.tv", "news.sky.com", "foxnews.com",
+     "newsmax.com", "oann.com", "abc.net.au", "gbnews.com",
+     "tvpworld.com"],
+]
 
 
 def get_gemini_key():
@@ -213,24 +340,43 @@ def gemini_assessment(api_key: str, headline: str, results):
         return None
 
 
-def show_live_check(headline: str, article: str):
-    """Render the live news check section for the given headline."""
+def show_live_check(headline: str, article: str,
+                    ml_verdict=None, ml_confidence=None):
+    """Render the live news check section for the given headline.
+
+    Shows recent coverage from the tracked outlets only, then
+    cross-checks it against the model's verdict: when the model
+    and the coverage disagree, the coverage is the stronger signal,
+    because the model only judges writing style and knows nothing
+    about recent events.
+    """
     query = headline.strip() or " ".join(article.split()[:12])
     st.subheader("Live news check")
-    st.caption("Searched current coverage for this headline. This sends "
-               "only the headline to Google News — untick the box above "
-               "to keep everything on-device.")
+    st.caption("Recent coverage matching this headline. Only the "
+               "headline is used for the search.")
     with st.spinner("Checking live news coverage…"):
         results, error = live_news_search(query)
     if error:
         st.warning(error)
         return
     if not results:
-        st.info("No recent coverage found for this headline. That does not "
-                "prove it is false — it may be too new, too local, or "
-                "worded differently. Try the exact headline from the "
-                "article you saw.")
+        if ml_verdict == "Real":
+            st.info("No recent coverage found — the model says the writing "
+                    "looks real, but no outlet has reported this yet. It "
+                    "may be too new, too local, or worded differently.")
+        elif ml_verdict == "Fake":
+            st.info("No outlet has reported this either, which lines up "
+                    "with the model — but no coverage alone does not prove "
+                    "a claim false.")
+        else:
+            st.info("No recent coverage found for this headline. That does "
+                    "not prove it is false — it may be too new, too local, "
+                    "or worded differently. Try the exact headline from "
+                    "the article you saw.")
         return
+    outlets = {r["source"] for r in results if r["source"]}
+    st.caption(f"Coverage found in {len(outlets)} "
+               f"outlet{'s' if len(outlets) != 1 else ''}.")
     for r in results:
         meta = " · ".join(p for p in (r["source"], r["published"]) if p)
         st.markdown(f"— [{r['title']}]({r['link']})"
@@ -240,6 +386,17 @@ def show_live_check(headline: str, article: str):
     st.caption("Read the coverage above to judge whether the claim is "
                "actually true — the model verdict is only about writing "
                "style, not facts.")
+    if ml_verdict == "Fake" and len(outlets) >= 2:
+        st.warning(
+            f"The model called this Fake, but {len(outlets)} news outlets "
+            "are reporting it. The model only judges writing style and "
+            "knows nothing about recent events — when the model and live "
+            "coverage disagree like this, the coverage is the stronger "
+            "signal.")
+    elif ml_verdict == "Real" and len(outlets) >= 2:
+        st.info(
+            f"The model verdict lines up with live coverage: "
+            f"{len(outlets)} outlets are reporting this.")
     api_key = get_gemini_key()
     if api_key:
         with st.spinner("Gemini is reading the coverage…"):
@@ -307,9 +464,10 @@ with st.form("analyse"):
     live_check = st.checkbox(
         "Also check live news coverage for this headline",
         value=True,
-        help="Searches Google News for the headline and shows real recent "
-             "coverage next to the model verdict. Sends only the headline "
-             "to Google News. Untick to keep everything on-device.")
+        help="Searches live news coverage for the headline and shows real "
+             "recent coverage next to the model verdict. Sends only the "
+             "headline to the news search. Untick to keep everything "
+             "on-device.")
     submitted = st.form_submit_button("Analyse article", type="primary")
 
 headline = st.session_state.headline
@@ -360,7 +518,7 @@ if submitted:
         st.session_state.history = st.session_state.history[:5]
         if live_check:
             st.divider()
-            show_live_check(headline, article)
+            show_live_check(headline, article, verdict, confidence)
 
 if st.session_state.history:
     st.subheader("Recent checks")
