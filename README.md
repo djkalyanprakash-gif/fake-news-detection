@@ -13,6 +13,9 @@ Fake News Detection is a Streamlit web app that estimates whether a news article
 
 - Paste any headline and article text and get a Real or Fake verdict with confidence
 - Shows the words that influenced the result most
+- Live news check: searches Google News for the headline and shows real recent coverage next to the verdict, so recent events the model never saw can still be judged from actual reporting (on by default, untick to turn it off)
+- Optional Gemini summary: if a Gemini API key is set in Streamlit secrets (`GEMINI_API_KEY`), Gemini briefly says whether the coverage found supports the headline. Without a key the live check still works, showing the sources only
+- Warns clearly when the pasted text is too short for a reliable verdict
 - Three built-in examples to try without typing anything
 - Keeps a short history of recent checks in the session
 - Runs the full trained model when it is present, and falls back to a small sample model with a clear on-screen warning if the model file is missing
@@ -105,19 +108,22 @@ The trained model is tracked in this repo as `model/fake_news_model.joblib.b64` 
 2. **TF-IDF:** the cleaned text is turned into word and two-word features, weighted by how distinctive they are across the training set (20,000 features).
 3. **Logistic regression:** the features are fed to a logistic regression classifier, which outputs the probability that the article is fake. Above 0.5 the verdict is Fake, below it Real.
 4. **Top words:** because the classifier is linear, the app can show which words in the article pushed the score up or down the most.
+5. **Live check:** if the box is ticked, the app also searches Google News for the headline and lists recent matching articles, so the user can compare the model's style-based verdict with real current reporting. With a Gemini API key set in secrets, Gemini adds a short summary of whether the coverage supports the headline.
 
 ## Limitations
 
-- The training data is mostly 2016–2018 US and celebrity news, so the model is weakest on recent events, Indian news, and non-English text.
+- The training data is mostly 2016–2018 US and celebrity news, so the model is weakest on recent events, Indian news, and non-English text. The live news check is there to cover exactly that gap, but it only shows coverage — it does not decide what is true.
 - It judges writing style, not facts. A well-written false article can score as real, and a badly written true article can score as fake.
-- Short headlines alone give unreliable results; the app needs at least a few sentences of article text.
+- Short headlines alone give unreliable model results; the app warns about this, and for a headline on its own it shows only the live news check.
+- The live check needs internet access and Google News to be reachable; if the search fails, the app says so and still shows the model verdict.
 
 ## Privacy & Security
 
-- Articles you paste are processed in memory only. They are never stored, saved to disk, or sent anywhere.
-- There is no login, no analytics, and no tracking. The app makes no external network calls.
+- The model runs locally inside the app — pasted articles are processed in memory only and are never stored or saved to disk.
+- There is no login, no analytics, and no tracking.
+- The live news check is the only external call the app makes, and only when its box is ticked (it is on by default): it sends only the headline to Google News search and shows the matching coverage. The article text is never sent. Untick the box and nothing leaves the app.
+- If a Gemini API key is set in Streamlit secrets, the headline and the titles of the coverage found are also sent to the Gemini API for a short summary. No key is set by default, and the key is never stored in this repository.
 - The only cookies are the ones Streamlit itself needs to keep the app running.
-- The model runs locally inside the app — your text never leaves the server it runs on.
 - Recent checks are kept only in your browser session (in memory) and disappear when the session ends. You can clear them any time with the Clear history button.
 - This repository contains no secrets, tokens, passwords, or personal data. See [SECURITY.md](SECURITY.md).
 
