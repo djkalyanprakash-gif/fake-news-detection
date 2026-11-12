@@ -139,16 +139,29 @@ elif metrics:
 
 if "history" not in st.session_state:
     st.session_state.history = []
+if "headline" not in st.session_state:
+    st.session_state.headline = ""
+if "article" not in st.session_state:
+    st.session_state.article = ""
+
+
+def _fill_example():
+    choice = st.session_state.example_choice
+    if choice in EXAMPLES:
+        st.session_state.headline, st.session_state.article = EXAMPLES[choice]
+
+
+st.selectbox("Try an example", ["— Write your own —", *EXAMPLES],
+             key="example_choice", on_change=_fill_example)
 
 with st.form("analyse"):
-    example = st.selectbox("Try an example", ["— Write your own —", *EXAMPLES])
-    headline = st.text_input("Headline", value="")
-    article = st.text_area("Article text", height=180,
-                           placeholder="Paste the full article here…")
+    st.text_input("Headline", key="headline")
+    st.text_area("Article text", height=180, key="article",
+                 placeholder="Paste the full article here…")
     submitted = st.form_submit_button("Analyse article", type="primary")
 
-if example != "— Write your own —" and not submitted:
-    headline, article = EXAMPLES[example]
+headline = st.session_state.headline
+article = st.session_state.article
 
 if submitted:
     full = f"{headline} {article}".strip()
