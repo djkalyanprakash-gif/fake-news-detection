@@ -10,15 +10,29 @@ If model/fake_news_model.joblib is missing, the app tries the base64
 copy at model/fake_news_model.joblib.b64. If neither is present it
 still works: it trains a small in-memory fallback on built-in samples
 and says so clearly on screen, instead of crashing.
+
+The model only knows 2016–2018 training data, so it cannot judge
+recent events. The optional live check searches Google News for the
+headline and shows real recent coverage next to the model verdict.
+If a Gemini API key is set in Streamlit secrets (GEMINI_API_KEY),
+Gemini briefly summarises whether that coverage supports the
+headline. Without a key the live check still works — it just shows
+the sources without a summary. The live check is off when the user
+unticks it, and then nothing leaves the app.
 """
 
 import base64
+import html
 import io
 import json
 import re
+import xml.etree.ElementTree as ET
+from email.utils import parsedate_to_datetime
 from pathlib import Path
+from urllib.parse import quote_plus
 
 import joblib
+import requests
 import streamlit as st
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -106,6 +120,135 @@ def top_words(model, text: str, n: int = 8):
         return []
 
 
+def live_news_search(query: str, max_results: int = 5):
+    """Search Google News (RSS, no key needed) for recent coverage.
+
+    Returns (results, error): results is a list of dicts with
+    title, link, source and published; error is a short message
+    when the search itself failed, else None.
+    """
+    query = " ".join(str(query or "").split())[:200]
+    if not query:
+        return [], "No headline to search for."
+    url = ("https://news.google.com/rss/search?q="
+           f"{quote_plus(query)}&hl=en-IN&gl=IN&ceid=IN:en")
+    try:
+        resp = requests.get(
+            url,
+            headers={"User-Agent": "Mozilla/5.0 (compatible; NewsCheck/1.0)"},
+            timeout=10)
+        resp.raise_for_status()
+        root = ET.fromstring(resp.content)
+    except Exception:
+        return [], ("Live news search is unavailable right now — "
+                    "check your connection and try again.")
+    results = []
+    for item in root.iter("item"):
+        title = html.unescape((item.findtext("title") or "").strip())
+        link = (item.findtext("link") or "").strip()
+        if not title or not link:
+            continue
+        # Google News titles end with " - SourceName"; split it off.
+        source = ""
+        if " - " in title:
+            title, source = title.rsplit(" - ", 1)
+        source_el = item.find("source")
+        if source_el is not None and source_el.text:
+            source = source_el.text.strip()
+        published = ""
+        pub = item.findtext("pubDate")
+        if pub:
+            try:
+                published = parsedate_to_datetime(pub).strftime("%d %b %Y")
+            except Exception:
+                published = ""
+        results.append({"title": title, "link": link,
+                        "source": source, "published": published})
+        if len(results) >= max_results:
+            break
+    return results, None
+
+
+def get_gemini_key():
+    """Gemini API key from Streamlit secrets, or None if not set."""
+    try:
+        key = st.secrets.get("GEMINI_API_KEY")
+        return key.strip() if isinstance(key, str) and key.strip() else None
+    except Exception:
+        return None
+
+
+def gemini_assessment(api_key: str, headline: str, results):
+    """Ask Gemini whether the found coverage supports the headline.
+
+    Returns a short plain-language assessment, or None on any failure.
+    The model is told to judge only from the listed coverage, not
+    from its own knowledge.
+    """
+    coverage = "\n".join(
+        f"- {r['title']} ({r['source'] or 'unknown source'}"
+        f"{', ' + r['published'] if r['published'] else ''})"
+        for r in results)
+    prompt = (
+        "Headline to check: " + headline.strip() + "\n\n"
+        "Recent news coverage found for this headline:\n" + coverage + "\n\n"
+        "In two or three short sentences, say whether this coverage supports "
+        "the headline, contradicts it, or is unclear — judging ONLY from the "
+        "articles listed above, not from your own knowledge. If the coverage "
+        "does not actually cover the headline's claim, say so plainly."
+    )
+    try:
+        resp = requests.post(
+            "https://generativelanguage.googleapis.com/v1beta/models/"
+            "gemini-2.5-flash:generateContent",
+            params={"key": api_key},
+            json={"contents": [{"parts": [{"text": prompt}]}]},
+            timeout=20)
+        resp.raise_for_status()
+        data = resp.json()
+        text = (data["candidates"][0]["content"]["parts"][0]["text"]
+                .strip())
+        return text or None
+    except Exception:
+        return None
+
+
+def show_live_check(headline: str, article: str):
+    """Render the live news check section for the given headline."""
+    query = headline.strip() or " ".join(article.split()[:12])
+    st.subheader("Live news check")
+    st.caption("Searched current coverage for this headline. This sends "
+               "only the headline to Google News — untick the box above "
+               "to keep everything on-device.")
+    with st.spinner("Checking live news coverage…"):
+        results, error = live_news_search(query)
+    if error:
+        st.warning(error)
+        return
+    if not results:
+        st.info("No recent coverage found for this headline. That does not "
+                "prove it is false — it may be too new, too local, or "
+                "worded differently. Try the exact headline from the "
+                "article you saw.")
+        return
+    for r in results:
+        meta = " · ".join(p for p in (r["source"], r["published"]) if p)
+        st.markdown(f"— [{r['title']}]({r['link']})"
+                    + (f"  \n  <span class='muted'>{meta}</span>"
+                       if meta else ""),
+                    unsafe_allow_html=True)
+    st.caption("Read the coverage above to judge whether the claim is "
+               "actually true — the model verdict is only about writing "
+               "style, not facts.")
+    api_key = get_gemini_key()
+    if api_key:
+        with st.spinner("Gemini is reading the coverage…"):
+            verdict = gemini_assessment(api_key, query, results)
+        if verdict:
+            st.write("**Gemini's read of the coverage:**")
+            st.write(verdict)
+
+
 st.set_page_config(page_title="Fake News Detection", page_icon="📰", layout="centered")
 
 st.markdown("""
@@ -161,6 +304,12 @@ with st.form("analyse"):
     st.text_input("Headline", key="headline")
     st.text_area("Article text", height=180, key="article",
                  placeholder="Paste the full article here…")
+    live_check = st.checkbox(
+        "Also check live news coverage for this headline",
+        value=True,
+        help="Searches Google News for the headline and shows real recent "
+             "coverage next to the model verdict. Sends only the headline "
+             "to Google News. Untick to keep everything on-device.")
     submitted = st.form_submit_button("Analyse article", type="primary")
 
 headline = st.session_state.headline
@@ -169,7 +318,13 @@ article = st.session_state.article
 if submitted:
     full = f"{headline} {article}".strip()
     if len(clean(full)) < 20:
-        st.error("Please paste a headline and at least a few sentences of article text.")
+        if headline.strip() and live_check:
+            st.info("Too little text for the model — it needs a headline "
+                    "and at least a few sentences. Showing the live news "
+                    "check for the headline instead.")
+            show_live_check(headline, article)
+        else:
+            st.error("Please paste a headline and at least a few sentences of article text.")
     else:
         proba = model.predict_proba([clean(full)])[0]
         fake_prob = float(proba[1])
@@ -203,6 +358,9 @@ if submitted:
             "headline": headline or "(no headline)",
             "verdict": verdict, "confidence": round(confidence, 2)})
         st.session_state.history = st.session_state.history[:5]
+        if live_check:
+            st.divider()
+            show_live_check(headline, article)
 
 if st.session_state.history:
     st.subheader("Recent checks")
